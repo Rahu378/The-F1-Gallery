@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..config import settings
-from ..data.source import Frame, build_source, catalogue
+from ..data.source import NEUTRALISED, Frame, build_source, catalogue
 from ..grafana.client import grafana
 from ..grafana.metrics import metrics
 from ..grafana.remote_write import RemoteWriter
@@ -55,6 +55,8 @@ class State:
     director_latency: int = 0
     grafana_live: bool = False
     pairings_scored: int = 0
+    status: str = "green"      # track status, straight off the timing channel
+    pace: float = 0.0          # seconds per lap the field is running now
 
 
 class Orchestrator:
@@ -93,6 +95,10 @@ class Orchestrator:
         self._decisions = 0
         self.ot_total = 0
         self.ot_caught = 0
+        # Cuts per tier, kept separately because one counter relabelled with
+        # whichever tier was last used is not a counter — see _push_metrics.
+        self._cuts_by_tier: dict[str, int] = {}
+        self._status = "green"
 
     # ------------------------------------------------------------------ log
     def _detect_overtakes(self, frame: Frame) -> list[dict]:
@@ -123,6 +129,21 @@ class Orchestrator:
                 })
         self._last_pos = now
         return events
+
+    def _count_capture(self, frame: Frame, live: bool) -> None:
+        """Capture-rate accounting for one completed pass.
+
+        Two things are excluded from the denominator. Passes made while nobody
+        is connected, because the director idles then and counting those would
+        credit it with misses it was never asked to make. And passes made under
+        a safety car, because those are pit-stop shuffles rather than moments
+        any camera could have caught — counting them adds misses that were
+        never catchable and understates the rate.
+        """
+        if not (self.watched and frame.racing):
+            return
+        self.ot_total += 1
+        self.ot_caught += 1 if live else 0
 
     def _emit(self, kind: str, text: str, tier: str = "") -> None:
         self._log.insert(0, LogEntry(self.state.race_t, kind, text, tier))
@@ -163,8 +184,16 @@ class Orchestrator:
             ("gallery_race_lap", {}, float(frame.lap)),
             ("gallery_on_air_score", {}, float(self.guard.current_score)),
             ("gallery_director_latency_ms", {}, float(self.state.director_latency)),
-            ("gallery_cuts_total", {"tier": self.state.director_tier}, float(self._cut_count)),
+            ("gallery_track_status", {"status": frame.status}, 1.0),
+            ("gallery_field_pace_seconds", {}, float(frame.pace)),
         ]
+        # One counter carrying the *total* under whichever tier happened to be
+        # last used is not a per-tier counter: the moment the tier flips, the
+        # old series flatlines and the new one jumps to the full total, so
+        # sum by (tier) double-counts every cut before the flip. Each tier
+        # keeps its own count and they add up to the total.
+        for tier, n in sorted(self._cuts_by_tier.items()):
+            batch.append(("gallery_cuts_total", {"tier": tier}, float(n)))
         for b in battles[:8]:
             lb = {"position": str(b.position), "ahead": b.ahead, "behind": b.behind}
             batch.append(("gallery_battle_tension", lb, b.score))
@@ -299,17 +328,24 @@ class Orchestrator:
                 # nobody is watching, so counting those would credit it with
                 # misses it was never asked to make — and after any quiet spell
                 # the headline number reads 0%, which is worse than useless.
-                if self.watched:
-                    self.ot_total += 1
-                    self.ot_caught += 1 if live else 0
+                self._count_capture(frame, live)
                 self._emit("overtake",
                            f"P{ov['pos']} — {ov['passer']} passes {ov['passed']}"
-                           + (" · on air" if live else ""))
+                           + (" · on air" if live else "")
+                           + ("" if frame.racing else " · neutralised"))
                 metrics.inc("gallery_overtakes_total", on_air="1" if live else "0")
                 # A pass the director was actually watching is the moment worth
                 # reacting to. One it missed is worth recording, not celebrating.
-                if live:
+                if live and frame.racing:
                     self._moment = {**ov, "at": frame.t}
+
+            if frame.status != self._status:
+                self._status = frame.status
+                self._emit("system",
+                           "green flag — racing" if frame.racing
+                           else f"{frame.status.replace('_', ' ')} — scoring suspended")
+            self.state.status = frame.status
+            self.state.pace = frame.pace
 
             self.state.lap = frame.lap
             self.state.race_t = frame.t
@@ -413,6 +449,7 @@ class Orchestrator:
         self.state.director_tier = decision.tier
         self.state.director_latency = decision.latency_ms
         metrics.inc("gallery_cuts_total", tier=decision.tier)
+        self._cuts_by_tier[decision.tier] = self._cuts_by_tier.get(decision.tier, 0) + 1
         if decision.tier in ("adk", "genai"):
             self._decisions += 1
         self._cut_count += 1
@@ -461,11 +498,14 @@ class Orchestrator:
             self._emit("system", "metrics: no remote_write credentials — local /metrics only")
             return
         self._emit("system", "metrics: pushing to grafana cloud every 15s")
+        # Long enough for the first tick to fill a batch, short enough that a
+        # deploy shows up on the dashboard while somebody is still looking at it.
+        await asyncio.sleep(2)
         while self._running:
-            await asyncio.sleep(15)
             batch = list(self._push_batch)
             if batch:
                 await self.writer.push(batch)
+            await asyncio.sleep(15)
 
     async def _audit_loop(self) -> None:
         """Read back through MCP what this director actually put on air.
@@ -522,8 +562,12 @@ class Orchestrator:
                          },
             "grafana": {"live": s.grafana_live, "url": grafana.dashboard_url,
                         "enabled": grafana.enabled,
+                        "remote_write": self.writer.enabled,
                         "pushed": self.writer.sent,
+                        "push_failed": self.writer.failed,
                         "push_error": self.writer.last_error},
+            "track": {"status": s.status, "racing": s.status not in NEUTRALISED,
+                      "pace": round(s.pace, 2)},
             "pairings_scored": s.pairings_scored,
             "capture": {"total": self.ot_total, "caught": self.ot_caught,
                         "rate": round(self.ot_caught / self.ot_total, 3)

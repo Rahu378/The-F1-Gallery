@@ -213,6 +213,20 @@ and the WebSocket went silent while HTTP stayed healthy. Anyone opening the
 page after that saw a frozen screen. Found by connecting six clients and
 watching all six receive the opening message and then hang.
 
+**A session median lap time is the wrong conversion for a gap.** Gaps are a
+difference in race distance, and turning that into seconds needs a
+seconds-per-lap. The session median works until the field stops running at
+session pace: behind a safety car a lap takes half again as long, so every gap
+came out short by that factor and twenty cars reported two tenths apart. The
+per-pair racing-speed gate does not catch it either — a safety car runs at
+120–160 km/h, well above the 60 km/h floor that screens out the pits. So the
+scorer saw nineteen simultaneous photo finishes at exactly the moment the world
+feed should have been on the safety car. Pace is now measured over a rolling
+window from the field's own progress, and the track-status channel suspends
+scoring outright while the field is neutralised. The history buffer is dropped
+with it, or the first green-flag sample is differenced against a caution gap
+and every closing rate spikes on the restart lap.
+
 **Gemini 2.5 thinks by default, and it dominates latency.** Measured on
 Vertex: 3.1–7.5 s per call, against 0.7–0.9 s with `thinking_budget=0`. The
 director picks from a ranked shortlist, so the thinking budget buys nothing.
@@ -272,6 +286,17 @@ Incredible wheel-to-wheel action between the two McLaren teammates!
 ```
 
 Nothing in the prompt says Piastri and Norris drive for the same team.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+```
+
+Deterministic and offline — no cache, no network, no model calls. They cover
+the track-status projection, the rolling pace estimate, and what the scorer does
+when the field is neutralised, which is the one situation a replay of a real
+race cannot be relied on to reach on demand.
 
 ## Does it actually work?
 
@@ -381,14 +406,19 @@ instance serving one.
 
 ## Known gaps
 
-**No metrics in Grafana Cloud.** The timeseries panels are empty. Grafana
-Cloud cannot scrape a process it has no route to, so the metrics need pushing
-via Prometheus `remote_write`, which needs a Cloud Access Policy token that is
-not yet configured. The "Director cuts" panel works regardless, since
-annotations go over the API.
+**Metrics in Grafana Cloud need three variables set.** Grafana Cloud cannot
+scrape a process it has no route to, so the app pushes its own metrics over
+Prometheus `remote_write` instead. That path is implemented and the deploy
+script already wires it through, but it stays dark until `GRAFANA_PROM_URL`,
+`GRAFANA_PROM_USER` and `GRAFANA_PROM_TOKEN` are filled in — URL and user from
+your stack's Prometheus "Send Metrics" page, token from a Cloud Access Policy
+scoped `metrics:write`. `GET /api/health` reports `metrics.remote_write`, the
+push count and the last rejection, so empty panels can be told apart from
+absent credentials. Annotations go over the Grafana API and work regardless.
 
-**Gap accuracy.** Gaps are progress difference times median lap time. Good to
-roughly a tenth under racing conditions; not a substitute for official timing.
+**Gap accuracy.** Gaps are a difference in race distance converted with the
+pace the field is currently running. Good to roughly a tenth under racing
+conditions; not a substitute for official timing.
 
 ## Layout
 
@@ -400,6 +430,7 @@ backend/
   main.py     FastAPI + WebSocket
 frontend/     broadcast UI
 scripts/      deploy, prefetch, Grafana Cloud switchover
+tests/        caution handling, metric push shape
 ```
 
 ## License

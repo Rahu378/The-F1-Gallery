@@ -123,7 +123,18 @@ async def health() -> dict:
         "grafana": {"configured": grafana.enabled, "url": grafana.url,
                     "dashboard": grafana.dashboard_url},
         "race": {"source": orch.source.meta.source if orch else "-",
-                 "circuit": orch.source.meta.name if orch else "-"},
+                 "circuit": orch.source.meta.name if orch else "-",
+                 "track_status": orch.state.status if orch else "-"},
+        # Without this an empty Grafana Cloud dashboard is undiagnosable from
+        # outside the container: the credentials, the push count and the last
+        # rejection all live in the process. `configured` false means the three
+        # GRAFANA_PROM_* variables are not set; `pushed` stuck at 0 with an
+        # error set means they are wrong.
+        "metrics": {"remote_write": orch.writer.enabled if orch else False,
+                    "url": settings.prom_push_url or None,
+                    "pushed": orch.writer.sent if orch else 0,
+                    "failed": orch.writer.failed if orch else 0,
+                    "last_error": orch.writer.last_error if orch else None},
     }
 
 
