@@ -8,6 +8,8 @@ Agent-directed world feed for a Formula 1 broadcast.
 
 Built for the Agentic Cinema hackathon, Grafana track.
 
+https://youtu.be/n4R7Ut1NK1U?si=x9oJ-bqeCo-EYklm
+
 ## The problem
 
 An F1 broadcast has a camera on every car and a hundred more around the
