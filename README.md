@@ -1,4 +1,4 @@
-# The Gallery
+# The F1 Gallery:
 
 Agent-directed world feed for a Formula 1 broadcast.
 
@@ -7,6 +7,8 @@ Agent-directed world feed for a Formula 1 broadcast.
 **Dashboard** — https://bluehalibut1967.grafana.net/public-dashboards/d86453f15cce4974a052692a6374e6c4 (no login)
 
 Built for the Agentic Cinema hackathon, Grafana track.
+
+<img width="1098" height="701" alt="Screenshot 2026-09-20 at 12 00 20 AM" src="https://github.com/user-attachments/assets/05bc23a0-97f8-46cb-ae50-9f988f447fb7" />
 
 https://youtu.be/n4R7Ut1NK1U?si=x9oJ-bqeCo-EYklm
 
