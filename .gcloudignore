@@ -16,3 +16,4 @@ grafana-data
 *.log
 .DS_Store
 docker-compose.yml
+tests

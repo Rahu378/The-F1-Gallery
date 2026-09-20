@@ -7,6 +7,7 @@ with no network and no FastF1 cache — the agent stack is identical either way.
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -16,6 +17,85 @@ from ..config import CACHE_DIR, settings
 from .geometry import Centerline, synthetic_circuit, unwrap_progress
 
 log = logging.getLogger("gallery.data")
+
+# The F1 track-status feed, as FastF1 exposes it: single-character codes on a
+# timestamped channel. 3 is undocumented and rare; treat it as a yellow rather
+# than neutralising the field on a code we cannot identify.
+TRACK_STATUS = {
+    "1": "green",
+    "2": "yellow",
+    "3": "yellow",
+    "4": "safety_car",
+    "5": "red",
+    "6": "vsc",
+    "7": "vsc",       # "VSC ending" — still neutralised until the green flag
+}
+
+# Periods where overtaking is forbidden and the field is running to a delta.
+NEUTRALISED = frozenset({"safety_car", "vsc", "red"})
+
+
+def status_series(times: np.ndarray, codes: list[str], grid: np.ndarray,
+                  default: str = "green") -> np.ndarray:
+    """Project a timestamped track-status channel onto a uniform time grid.
+
+    The feed is a step function — a status holds until the next message — so
+    each grid sample takes the last status published at or before it. Samples
+    before the first message fall back to `default`.
+    """
+    out = np.full(len(grid), default, dtype=object)
+    if len(times) == 0:
+        return out
+    order = np.argsort(times)
+    t_sorted = np.asarray(times, dtype=float)[order]
+    c_sorted = [codes[i] for i in order]
+    idx = np.searchsorted(t_sorted, grid, side="right") - 1
+    for k, i in enumerate(idx):
+        if i >= 0:
+            out[k] = TRACK_STATUS.get(str(c_sorted[i]).strip(), default)
+    return out
+
+
+def field_pace(prog: np.ndarray, step: float, fallback: float,
+               window_s: float = 20.0, lo_mult: float = 0.5,
+               hi_mult: float = 4.0) -> np.ndarray:
+    """Seconds per lap the field is actually running, per grid sample.
+
+    Gaps are a difference in race distance, and turning that into seconds needs
+    a seconds-per-lap. Using the session median for that is wrong the moment the
+    field stops running at session pace: behind a safety car a lap takes half
+    again as long, so a median-derived gap understates the real one by that
+    factor and the whole field reads as nose to tail.
+
+    The rate is taken over a window rather than between adjacent samples, since
+    a 0.5 s difference of interpolated lap counts is mostly noise. Cars that are
+    not moving — pits, grid, stopped on track — are dropped before the median so
+    one retirement cannot drag the field's pace toward zero.
+    """
+    prog = np.atleast_2d(np.asarray(prog, dtype=float))
+    n = prog.shape[1]
+    if n < 2:
+        return np.full(max(n, 1), fallback)
+
+    w = max(1, int(round(window_s / step)))
+    idx = np.arange(n)
+    hi = np.minimum(n - 1, np.maximum(idx, w))
+    lo = np.maximum(0, hi - w)
+    span = np.maximum(step, (hi - lo) * step)
+
+    rate = (prog[:, hi] - prog[:, lo]) / span          # laps per second, per car
+    rate = np.where(rate > 1e-5, rate, np.nan)         # parked cars out
+
+    with warnings.catch_warnings():
+        # A stopped field is an all-NaN column by construction, not a surprise.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        med = np.nanmedian(rate, axis=0)
+    spl = np.where(np.isfinite(med) & (med > 0), 1.0 / np.where(med > 0, med, 1.0), np.nan)
+    # A red flag drives the rate to zero and the reciprocal to infinity; a
+    # single-sample glitch can do the opposite. Clamp to a band around the
+    # green-flag baseline and fall back to it where there is no signal at all.
+    spl = np.clip(spl, lo_mult * fallback, hi_mult * fallback)
+    return np.where(np.isfinite(spl), spl, fallback)
 
 # Fallback identity colours when a source has none (kept distinct, not team-accurate).
 _PALETTE = [
@@ -48,6 +128,19 @@ class Frame:
     lap: int
     cars: list[Car]
     total_laps: int = 0
+    status: str = "green"   # green | yellow | safety_car | vsc | red
+    pace: float = 0.0       # seconds per lap the field is currently running
+
+    @property
+    def racing(self) -> bool:
+        """Is the field racing, or neutralised behind a safety car or a flag?
+
+        Overtaking is forbidden under a safety car, a VSC and a red flag, so
+        nothing in those periods is a battle no matter how small the gaps get.
+        A local yellow only covers one sector and the rest of the lap is still
+        green, so it stays racing.
+        """
+        return self.status not in NEUTRALISED
 
 
 @dataclass
@@ -133,8 +226,12 @@ class SyntheticSource:
                 ahead = order[i - 1]
                 pace = self.base_pace[self.cars.index(c)]
                 c.gap_ahead = max(0.0, (ahead.progress - c.progress) * pace)
+        # The synthetic race has no safety cars, so it is green throughout and
+        # its pace is the field's baseline. Stated rather than left to default,
+        # so downstream code never has to special-case the source.
         return Frame(t=self.t, lap=min(lap, self.total_laps),
-                     cars=list(order), total_laps=self.total_laps)
+                     cars=list(order), total_laps=self.total_laps,
+                     status="green", pace=float(np.median(self.base_pace)))
 
 
 # FastF1 position coordinates are in tenths of a metre. Monza measures 57,347
@@ -192,8 +289,11 @@ class FastF1Source:
 
         self.grid = np.arange(t0, t1, step)
 
-        med = laps["LapTime"].dt.total_seconds().median()
-        self.median_lap = float(med) if med == med else 90.0
+        # Baseline pace, used as the fallback and as the band the live pace is
+        # clamped into. Taken from green-flag laps only: a session median that
+        # includes safety-car laps is pulled slow by them, which is the same
+        # error this is meant to correct, just smaller.
+        self.median_lap = self._green_median_lap(laps)
 
         self.cars: list[Car] = []
         self.prog: dict[str, np.ndarray] = {}
@@ -215,6 +315,15 @@ class FastF1Source:
             tc = str(row["TeamColor"].iloc[0]) if len(row) else ""
             color = f"#{tc}" if tc and not tc.startswith("#") else (tc or _PALETTE[i % len(_PALETTE)])
             self.cars.append(Car(num=d, code=code, team=team, color=color))
+
+        # --- track status and live field pace ---
+        # Both are grid-aligned lookups, so the hot loop reads an index rather
+        # than recomputing anything per frame.
+        self.status = self._status_grid(ses)
+        self.pace = field_pace(
+            np.vstack([self.prog[c.num] for c in self.cars]),
+            self.step, fallback=self.median_lap,
+        )
 
         # --- tyre state per driver per lap ---
         self.tyres: dict[str, list[tuple[float, str, int]]] = {}
@@ -289,6 +398,46 @@ class FastF1Source:
             numbers_a = np.append(numbers_a, numbers_a[-1] + 1.0)
 
         return np.interp(self.grid, starts_a, numbers_a)
+
+    @staticmethod
+    def _green_median_lap(laps) -> float:
+        """Median lap time over green-flag laps only.
+
+        `TrackStatus` on a lap is the concatenation of every status seen during
+        it, so a clean lap is exactly "1" and anything else saw a flag.
+        """
+        try:
+            secs = laps["LapTime"].dt.total_seconds()
+            green = laps["TrackStatus"].astype(str).str.strip() == "1"
+            med = secs[green].median()
+            if med == med and med > 0:
+                return float(med)
+        except Exception:  # noqa: BLE001 — older FastF1 without TrackStatus
+            pass
+        med = laps["LapTime"].dt.total_seconds().median()
+        return float(med) if med == med else 90.0
+
+    def _status_grid(self, ses) -> np.ndarray:
+        """Track status per grid sample, from the official status channel.
+
+        Inferring a safety car from pace would work, but timing publishes it
+        directly and a derived signal cannot be better than the one it is
+        derived from. If the channel is missing the race is treated as green
+        throughout, which is the old behaviour rather than a new failure.
+        """
+        try:
+            ts = ses.track_status
+            times = ts["Time"].dt.total_seconds().to_numpy()
+            codes = [str(c) for c in ts["Status"].tolist()]
+            grid = status_series(times, codes, self.grid)
+            flagged = int(np.sum(grid != "green"))
+            if flagged:
+                log.info("track status: %d of %d frames neutralised or flagged",
+                         flagged, len(grid))
+            return grid
+        except Exception as exc:  # noqa: BLE001
+            log.warning("no track status channel (%s) — assuming green throughout", exc)
+            return np.full(len(self.grid), "green", dtype=object)
 
     @staticmethod
     def _build_centerline(ses, pos, drivers) -> Centerline:
@@ -417,6 +566,8 @@ class FastF1Source:
         while self.i < len(self.grid):
             stride = max(1, int(round((dt() if callable(dt) else dt) / self.step)))
             t = float(self.grid[self.i])
+            pace = float(self.pace[self.i])
+            status = str(self.status[self.i])
             back = max(0, self.i - stride)
             span = max(1e-6, (self.i - back) * self.step)
             for c in self.cars:
@@ -436,12 +587,15 @@ class FastF1Source:
             order = sorted(self.cars, key=lambda c: -c.progress)
             for k, c in enumerate(order):
                 c.pos = k + 1
+                # Seconds per lap comes from what the field is running now, not
+                # from the session median — see field_pace.
                 c.gap_ahead = 0.0 if k == 0 else max(
-                    0.0, (order[k - 1].progress - c.progress) * self.median_lap
+                    0.0, (order[k - 1].progress - c.progress) * pace
                 )
             lap = max(1, int(order[0].progress) + 1)
             yield Frame(t=t, lap=min(lap, self.meta.total_laps or lap),
-                        cars=list(order), total_laps=self.meta.total_laps)
+                        cars=list(order), total_laps=self.meta.total_laps,
+                        status=status, pace=pace)
             self.i += stride
 
 
