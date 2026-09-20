@@ -12,3 +12,4 @@ README.md
 docker-compose.yml
 *.log
 .DS_Store
+tests

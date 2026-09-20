@@ -68,6 +68,24 @@ class TensionScorer:
         return 0.74
 
     def score_frame(self, frame: Frame) -> list[Battle]:
+        if not frame.racing:
+            # Behind a safety car the field closes to a few car lengths at well
+            # under racing speed, so every pairing reads as a photo finish — and
+            # not one of them is a fight, because overtaking is forbidden. Left
+            # alone this produces a wall of false maximum-tension battles at
+            # exactly the moment the world feed should be on the safety car.
+            #
+            # The per-pair RACING_SPEED gate does not catch this: a safety car
+            # runs at 120-160 km/h, comfortably above it.
+            #
+            # History goes with it. Keeping it would difference the first green
+            # sample against a caution gap several tenths smaller, and every
+            # closing rate on the restart lap would spike through FAST_CLOSE.
+            self._hist.clear()
+            for c in frame.cars:
+                c.closing = 0.0
+            return []
+
         cars: list[Car] = frame.cars
         out: list[Battle] = []
 

@@ -1,0 +1,4 @@
+# Test-only dependencies. Kept out of requirements.txt so they stay out of the
+# container image — the tests never run there.
+-r requirements.txt
+pytest>=8.0.0
