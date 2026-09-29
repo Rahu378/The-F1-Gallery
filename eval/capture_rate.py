@@ -52,6 +52,13 @@ def collect_overtakes(race: str, speed: float = 40.0, tick_hz: float = 10.0,
     for i, frame in enumerate(src.frames(dt * speed)):
         if laps and frame.lap > laps:
             break
+        # Positions change hands under a safety car too, but those are pit-stop
+        # shuffles rather than passes any camera could have caught. The live
+        # orchestrator excludes them from its capture rate; this has to match it
+        # or the two report different numbers for the same race.
+        if not frame.racing:
+            last = {c.num: c.pos for c in frame.cars}
+            continue
         now = {c.num: c.pos for c in frame.cars}
         for num, pos in now.items():
             was = last.get(num)
@@ -103,6 +110,12 @@ def run(race: str, policy: str, speed: float = 40.0, tick_hz: float = 10.0,
         battles = scorer.score_frame(frame)
 
         # --- did a position change hands, and were we watching it? ---
+        # Caution periods are excluded, matching Orchestrator._count_capture:
+        # nobody may overtake under a safety car, so an order change there is a
+        # pit stop, not a moment a camera missed.
+        if not frame.racing:
+            last_pos = {c.num: c.pos for c in frame.cars}
+            continue
         now = {c.num: c.pos for c in frame.cars}
         for num, pos in now.items():
             was = last_pos.get(num)

@@ -312,14 +312,23 @@ watching when they happened. That is countable, so it is counted.
 .venv/bin/python -m eval.capture_rate --race spa
 ```
 
-Four full races, 764 position changes, one camera, a four-second minimum hold:
+Four full races, 735 green-flag position changes, one camera, a four-second
+minimum hold:
 
 | Circuit | Passes | This pipeline | Follow the leader | Random | Of ceiling |
 |---|---|---|---|---|---|
 | Monza | 160 | **41.9%** | 3.1% | 15.0% | 46.5% |
-| Spa | 214 | **50.5%** | 1.4% | — | 56.0% |
-| Silverstone | 112 | **49.1%** | 1.8% | — | 53.4% |
-| Barcelona | 278 | **42.1%** | 0.0% | — | 48.1% |
+| Spa | 214 | **50.0%** | 1.4% | 14.5% | 55.4% |
+| Silverstone | 83 | **56.6%** | 2.4% | 6.0% | 60.3% |
+| Barcelona | 278 | **42.4%** | 0.0% | 12.2% | 48.6% |
+| **Pooled** | **735** | **46.1%** | **1.4%** | **12.8%** | **51.5%** |
+
+The denominator counts green-flag passes only. Positions change hands under a
+safety car as well, but those are pit-stop shuffles rather than moments a camera
+could have caught, and counting them adds misses that were never catchable.
+Silverstone is the race this matters on: 15.8% of it ran under a safety car or
+VSC, and 29 of its 112 order changes happened there. Including them reported
+43.8%; excluding them reports 56.6%, the highest of the four.
 
 The ceiling column matters. One camera cannot be in two places, so an oracle
 that knows every pass in advance still only reaches about 90%. Against what is
